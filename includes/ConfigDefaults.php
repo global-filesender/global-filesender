@@ -140,6 +140,10 @@ $default = array(
     'terasender_enabled' => true,
     'terareceiver_enabled' => false,
     'terareceiver_allowed' => true,
+    // Number of parallel download workers for encrypted transfers.
+    // 0 (default) means "fall back to terasender_worker_count".
+    // Clamped to terasender_worker_max_count.
+    'terareceiver_worker_count' => 0,
     'terasender_advanced' => false,
     'terasender_disableable' => true,
     'terasender_start_mode' => 'multiple',

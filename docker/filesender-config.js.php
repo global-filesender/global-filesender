@@ -111,6 +111,7 @@ window.filesender.config = {
     terareceiver_enabled: <?php  echo value_to_TF(Config::get('terareceiver_enabled')) ?>,
     terasender_advanced: <?php echo value_to_TF(Config::get('terasender_advanced')) ?>,
     terasender_worker_count: <?php echo Config::get('terasender_worker_count') ?>,
+    terareceiver_worker_count: <?php echo Config::get('terareceiver_worker_count') ?>,
     terasender_start_mode: '<?php echo Config::get('terasender_start_mode') ?>',
     terasender_worker_file: 'js/terasender/terasender_worker.js',
     terasender_upload_endpoint: '<?php echo Config::get('site_url') ?>rest.php/file/{file_id}/chunk/{offset}',

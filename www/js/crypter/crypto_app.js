@@ -790,12 +790,51 @@ window.filesender.crypto_app = function () {
                     });
             }
             catch(e) {
-                callbackError(e);                
-            }            
+                callbackError(e);
+            }
+        },
+
+        /*
+         * Decrypt a single, already-downloaded chunk and resolve with its
+         * plaintext (Uint8Array).
+         *
+         * Unlike decryptBlob() this performs NO sink write and NO completion
+         * signalling: the parallel receiver (TeraReceiver) downloads and
+         * decrypts chunks out of order and is responsible for re-ordering the
+         * plaintext before writing it to the sink. The per-chunk crypto checks
+         * (IV / AEAD / chunkid binding) are still applied here so a tampered or
+         * wrong-password chunk is rejected exactly as in the sequential path.
+         */
+        decryptChunkData: function (chunkid, encryptedChunk, encryption_details, key) {
+            var $this = this;
+            return new Promise(function (resolve, reject) {
+                try {
+                    var value = encryptedChunk;
+                    var decryptParams = {
+                        name: $this.crypto_crypt_name,
+                        iv: value.iv
+                    };
+
+                    // May reject (and, for GCM, augments decryptParams with the
+                    // additionalData / AEAD). It signals failure by invoking the
+                    // callback rather than throwing, so guard with a flag.
+                    var failed = false;
+                    $this.decryptBlobSpecificCryptoChunkChecks(
+                        chunkid, value, encryption_details, decryptParams,
+                        function (err) { failed = true; reject(err); });
+                    if (failed) return;
+
+                    crypto.subtle.decrypt(decryptParams, key, value.data)
+                        .then(function (result) { resolve(new Uint8Array(result)); })
+                        .catch(reject);
+                } catch (e) {
+                    reject(e);
+                }
+            });
         },
         /*
          * This method mainly focuses on creating an XMLHttpRequest to download the
-         * byte range for the desired chunk. There are some adjustments for padding 
+         * byte range for the desired chunk. There are some adjustments for padding
          * that have to be done which are handled by this method.
          *
          * Once a chunk has been downloaded decryptBlob() is called to decrypt and process it.
@@ -1195,7 +1234,16 @@ window.filesender.crypto_app = function () {
 
                             window.filesender.log("callbackDone()");
                             window.filesender.crypto_app_downloading = false;
-                                       
+
+                            // With the parallel receiver the transfer is only
+                            // truly complete once every chunk has been written
+                            // to the sink in order, which is what gets us here.
+                            // Mark the driver done now (not when the last chunk
+                            // merely finished downloading).
+                            if( filesender.terasender ) {
+                                filesender.terasender.status = 'done';
+                            }
+
                             if( progress ) {
                                 progress.html(window.filesender.config.language.download_complete);
                             }
@@ -1219,17 +1267,48 @@ window.filesender.crypto_app = function () {
                             transfer.id = transferid;
                             transfer.encryption = 1;
 
+                            // Reorder buffer. Parallel workers download and
+                            // decrypt chunks out of order, but the sinks
+                            // (legacy blob array, StreamSaver, FSWF) all assume
+                            // chunks arrive in order. The buffer queues decrypted
+                            // chunks keyed by id and flushes them to the sink
+                            // strictly in ascending order, so blobSink.visit is
+                            // called in the exact same order as the old
+                            // single-worker path. See crypto_reorder_buffer.js.
+                            var reorder = window.filesender.crypto_reorder_buffer(
+                                encryption_details.chunkcount,
+                                blobSink,
+                                function() { // onAllWritten: every chunk is written, in order
+                                    // Same final validation as the sequential path.
+                                    $this.decryptBlobSpecificFinalChunkChecks(
+                                        encryption_details.chunkcount,
+                                        encryption_details,
+                                        callbackError );
+                                    callbackDone( blobSink );
+                                },
+                                callbackError );
+
+                            // Called by the driver each time a worker finishes
+                            // downloading a chunk. Decrypt happens concurrently
+                            // (crypto.subtle.decrypt runs off the main thread),
+                            // then the result is queued and drained in order.
                             var decryptCallback = function( job ) {
-                                $this.decryptBlob(
+                                if( reorder.aborted ) return;
+                                $this.decryptChunkData(
                                     job.chunkid,
                                     job.encryptedChunk,
                                     job.encryption_details,
-                                    key,
-                                    filesender.terasender.receiver.blobSink,
-                                    function() {
-                                        // callbackNext()
-                                    },
-                                    callbackDone, callbackError );
+                                    key
+                                ).then( function( decrypted ) {
+                                    reorder.submit( job.chunkid, decrypted );
+                                }).catch( function(e) {
+                                    if( reorder.aborted ) return;
+                                    reorder.abort();
+                                    window.filesender.log("decryptCallback() chunk decrypt failed");
+                                    window.filesender.log(e);
+                                    filesender.client.decryptionFailedForTransfer( encryption_details.transferid );
+                                    callbackError(e);
+                                });
                             };
 
                             filesender.terasender.crypto_app = this;
@@ -1240,6 +1319,7 @@ window.filesender.crypto_app = function () {
                                 encryption_details: encryption_details,
                                 key: key,
                                 blobSink: blobSink,
+                                reorder: reorder,
                                 onChunkSuccess: decryptCallback,
                                 onProgress: onProgressCallback,
                                 onError: callbackError

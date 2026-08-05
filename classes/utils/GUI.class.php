@@ -152,6 +152,7 @@ class GUI
                     'js/FileSaver.js',
                     'js/crypter/crypto_common.js',
                     'js/crypter/crypto_blob_reader.js',
+                    'js/crypter/crypto_reorder_buffer.js',
                     'js/crypter/crypto_app.js',
                     'js/pbkdf2dialog.js',
                     'js/notification.js',

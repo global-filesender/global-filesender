@@ -261,7 +261,22 @@ window.filesender.terasender = {
             this.sendCommand(workerinterface, 'comeBackLater');
             return false;
         }
-        
+
+        // Receiver backpressure: hold workers back when too many chunks are
+        // already downloaded/decrypted but not yet written to the sink in
+        // order. receiver.chunkid is the next chunk id to allocate, so
+        // (chunkid - reorder.nextToWrite) is the number of chunks in flight or
+        // buffered. The parked worker retries via comeBackLater (500ms).
+        if(this.isReceiver() && this.receiver && this.receiver.reorder) {
+            var outstanding = this.receiver.chunkid - this.receiver.reorder.nextToWrite;
+            if(outstanding >= this.receiver.maxOutstanding) {
+                this.log('Receiver backpressure: ' + outstanding + ' chunks outstanding,' +
+                         ' asking worker:' + worker_id + ' to come back later');
+                this.sendCommand(workerinterface, 'comeBackLater');
+                return false;
+            }
+        }
+
         this.log('Giving job to worker:' + worker_id);
         
         this.jobAllocationLocked = true;
@@ -364,12 +379,17 @@ window.filesender.terasender = {
             }
             
             if(ratio >= 1) {
-                // completion message
+                // A chunk finished downloading. Hand it to the receiver which
+                // decrypts it and writes chunks to the sink in order. With
+                // parallel workers chunks may finish out of order, so the
+                // transfer is only "done" once the in-order drain has written
+                // every chunk -- that is signalled from the decrypt callback's
+                // callbackDone (which sets terasender.status = 'done'), NOT by
+                // whichever chunk happens to download last.
                 this.receiver.onChunkSuccess( job );
-            
+
                 if( job.chunkid >= encryption_details.chunkcount ) {
-                    this.log("evalProgress(recv) we have downloaded all the chunks!");
-                    this.status = 'done';
+                    this.log("evalProgress(recv) last chunk has finished downloading; awaiting in-order writes");
                 }
             } else {
                 // progress message
@@ -739,8 +759,28 @@ window.filesender.terasender = {
         }
 
         if( this.isReceiver()) {
-            // this will be expanded in a future PR
-            wcnt = 1;
+            // Parallel receive (TeraReceiver). Use terareceiver_worker_count,
+            // falling back to terasender_worker_count when unset (0), and
+            // clamp to terasender_worker_max_count. A value of 1 keeps the
+            // old strictly-sequential behaviour.
+            var rcnt = parseInt(filesender.config.terareceiver_worker_count);
+            if(isNaN(rcnt) || rcnt < 1) {
+                rcnt = parseInt(filesender.config.terasender_worker_count);
+            }
+            if(isNaN(rcnt) || rcnt < 1) {
+                rcnt = 1;
+            }
+            if(rcnt > filesender.config.terasender_worker_max_count) {
+                rcnt = filesender.config.terasender_worker_max_count;
+            }
+            wcnt = rcnt;
+
+            // Backpressure bound: never download/buffer more than this many
+            // chunks ahead of the in-order write pointer. Caps memory use at
+            // roughly maxOutstanding * chunk_size.
+            if( this.receiver ) {
+                this.receiver.maxOutstanding = 2 * wcnt;
+            }
         }
 
         this.workers = [];
